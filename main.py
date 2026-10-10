@@ -1,49 +1,33 @@
 import httpx
-from fastapi import FastAPI, Request, Response
-from mcp.server import Server
-from mcp.server.sse import SseServerTransport
-import mcp.types as types
+from fastapi import FastAPI
+from mcp.server.fastmcp import FastMCP
 
-app = FastAPI(title="SECOP II MCP Server", version="1.0.0")
+# Inicializar FastMCP compatible con mcp >= 2.0.0
+mcp = FastMCP("SECOP_FL")
 
-# Inicializar servidor MCP estándar
-server = Server("SECOP_FL")
+@mcp.tool()
+async def buscar_procesos_secop(
+    entidad: str | None = None,
+    objeto: str | None = None,
+    modalidad: str | None = None,
+    limite: int = 5
+) -> str:
+    """
+    Busca procesos de contratación pública en Colombia en la base de datos abierta de SECOP II.
 
-@server.list_tools()
-async def handle_list_tools() -> list[types.Tool]:
-    return [
-        types.Tool(
-            name="buscar_procesos_secop",
-            description="Busca procesos de contratación pública en Colombia en la base de datos abierta de SECOP II.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "entidad": {"type": "string", "description": "Nombre o parte del nombre de la entidad estatal"},
-                    "objeto": {"type": "string", "description": "Palabra clave en la descripción del procedimiento"},
-                    "modalidad": {"type": "string", "description": "Modalidad de contratación"},
-                    "limite": {"type": "integer", "description": "Número máximo de resultados (1-100)", "default": 5}
-                }
-            }
-        )
-    ]
-
-@server.call_tool()
-async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent]:
-    if name != "buscar_procesos_secop":
-        raise ValueError(f"Herramienta desconocida: {name}")
-
-    entidad = arguments.get("entidad")
-    objeto = arguments.get("objeto")
-    modalidad = arguments.get("modalidad")
-    limite = arguments.get("limite", 5)
-
+    Parámetros:
+    - entidad: nombre o fragmento del nombre de la entidad.
+    - objeto: texto que identifica el objeto o descripción del procedimiento.
+    - modalidad: modalidad de contratación.
+    - limite: cantidad máxima de resultados, entre 1 y 100.
+    """
     if not isinstance(limite, int) or isinstance(limite, bool):
-        return [types.TextContent(type="text", text="Error: el límite debe ser un número entero.")]
+        return "Error: el límite debe ser un número entero."
+
     limite = max(1, min(limite, 100))
-
     url = "https://www.datos.gov.co/resource/p6dx-8zbt.json"
+    
     filtros = []
-
     if entidad and entidad.strip():
         val = entidad.strip().upper().replace("'", "''")
         filtros.append(f"upper(entidad) like '%{val}%'")
@@ -67,10 +51,10 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
             respuesta.raise_for_status()
             datos = respuesta.json()
         except Exception as e:
-            return [types.TextContent(type="text", text=f"Error al consultar la API de SECOP II: {str(e)}")]
+            return f"Error al consultar la API de SECOP II: {str(e)}"
 
     if not datos or not isinstance(datos, list):
-        return [types.TextContent(type="text", text="No se encontraron procesos de contratación con los criterios especificados.")]
+        return "No se encontraron procesos de contratación con los criterios especificados."
 
     resultados = []
     for articulo in datos:
@@ -93,21 +77,14 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
         )
         resultados.append(item)
 
-    return [types.TextContent(type="text", text="\n\n".join(resultados))]
+    return "\n\n".join(resultados)
 
-# Configurar transporte SSE apuntando a /mcp/sse para mensajes y eventos
-sse = SseServerTransport("/mcp/sse")
-
-@app.get("/mcp/sse")
-async def handle_sse(request: Request):
-    async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
-        await server.run(streams[0], streams[1], server.create_initialization_options())
-
-@app.post("/mcp/sse")
-async def handle_messages(request: Request):
-    await sse.handle_post_message(request.scope, request.receive, request._send)
-    return Response(status_code=200)
+# Crear aplicación FastAPI
+app = FastAPI(title="SECOP II MCP Server", version="1.0.0")
 
 @app.get("/")
 async def raiz():
     return {"estado": "activo", "servicio": "SECOP II MCP Server"}
+
+# Montar las rutas SSE oficiales de FastMCP bajo el prefijo /mcp
+app.mount("/mcp", mcp.sse_app())
