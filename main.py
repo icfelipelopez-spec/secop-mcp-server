@@ -1,9 +1,9 @@
 import httpx
 from fastapi import FastAPI
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
-# Inicializar FastMCP compatible con mcp >= 2.0.0
-mcp = FastMCP("SECOP_FL")
+# Inicializar MCPServer compatible con mcp 2.x
+mcp = MCPServer("SECOP_FL")
 
 @mcp.tool()
 async def buscar_procesos_secop(
@@ -14,12 +14,6 @@ async def buscar_procesos_secop(
 ) -> str:
     """
     Busca procesos de contratación pública en Colombia en la base de datos abierta de SECOP II.
-
-    Parámetros:
-    - entidad: nombre o fragmento del nombre de la entidad.
-    - objeto: texto que identifica el objeto o descripción del procedimiento.
-    - modalidad: modalidad de contratación.
-    - limite: cantidad máxima de resultados, entre 1 y 100.
     """
     if not isinstance(limite, int) or isinstance(limite, bool):
         return "Error: el límite debe ser un número entero."
@@ -86,5 +80,5 @@ app = FastAPI(title="SECOP II MCP Server", version="1.0.0")
 async def raiz():
     return {"estado": "activo", "servicio": "SECOP II MCP Server"}
 
-# Montar las rutas SSE oficiales de FastMCP bajo el prefijo /mcp
+# Montar las rutas SSE oficiales de MCPServer
 app.mount("/mcp", mcp.sse_app())
