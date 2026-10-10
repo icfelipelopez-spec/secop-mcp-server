@@ -1,23 +1,23 @@
 import contextlib
+import os
 
 import httpx
+import uvicorn
 
 from fastapi import FastAPI
-from mcp.server.mcpserver import MCPServer
+from mcp.server.fastmcp import FastMCP
 
 
 # =====================================================
 # 1. CONFIGURACIÓN DEL SERVIDOR MCP
 # =====================================================
 
-mcp = MCPServer(
+mcp = FastMCP(
     "SECOP-Colombia-Server",
-    version="1.0.0"
+    stateless_http=True,   # 🔑 CLAVE para evitar el 404 en Render
 )
 
-SECOP_DATASET_URL = (
-    "https://www.datos.gov.co/resource/p6dx-8zbt.json"
-)
+SECOP_DATASET_URL = "https://www.datos.gov.co/resource/p6dx-8zbt.json"
 
 
 # =====================================================
@@ -25,49 +25,25 @@ SECOP_DATASET_URL = (
 # =====================================================
 
 def escapar_soql(valor: str) -> str:
-    """Escapa comillas simples en valores de texto SoQL."""
     return valor.replace("'", "''")
 
 
 def construir_filtro(campo: str, valor: str) -> str:
-    """Construye un filtro de búsqueda SoQL."""
-
     valor_seguro = escapar_soql(valor.strip().upper())
-
-    return (
-        f"upper({campo}) "
-        f"like '%{valor_seguro}%'"
-    )
+    return f"upper({campo}) like '%{valor_seguro}%'"
 
 
 # =====================================================
-# 3. HERRAMIENTA MCP: BÚSQUEDA DE PROCESOS SECOP II
+# 3. HERRAMIENTA MCP
 # =====================================================
 
 @mcp.tool()
 async def buscar_procesos_secop(
     termino: str,
     departamento: str | None = None,
-    limite: int = 5
+    limite: int = 5,
 ) -> str:
-    """
-    Busca procesos de contratación pública en SECOP II.
-
-    Parámetros:
-        termino:
-            Palabra clave del objeto contractual o de la entidad.
-
-        departamento:
-            Departamento de la entidad contratante.
-            Ejemplos: Bogotá D.C., Antioquia, Tolima.
-
-        limite:
-            Cantidad máxima de resultados, entre 1 y 100.
-    """
-
-    # -------------------------------------------------
-    # VALIDACIÓN DE ENTRADAS
-    # -------------------------------------------------
+    """Busca procesos de contratación pública en SECOP II."""
 
     if not termino or not termino.strip():
         return "Error: debes proporcionar una palabra clave."
@@ -77,191 +53,129 @@ async def buscar_procesos_secop(
 
     limite = max(1, min(limite, 100))
 
-    # -------------------------------------------------
-    # CONSTRUCCIÓN DE LA CONSULTA
-    # -------------------------------------------------
-
     palabra = termino.strip()
 
     filtros = [
-        (
-            "("
-            + construir_filtro("entidad", palabra)
-            + " OR "
-            + construir_filtro(
-                "descripci_n_del_procedimiento",
-                palabra
-            )
-            + ")"
-        )
+        "("
+        + construir_filtro("entidad", palabra)
+        + " OR "
+        + construir_filtro("descripci_n_del_procedimiento", palabra)
+        + ")"
     ]
 
     if departamento and departamento.strip():
-        filtros.append(
-            construir_filtro(
-                "departamento_entidad",
-                departamento
-            )
-        )
+        filtros.append(construir_filtro("departamento_entidad", departamento))
 
     parametros = {
         "$where": " AND ".join(filtros),
         "$limit": limite,
-        "$order": "fecha_de_publicacion_del DESC"
+        "$order": "fecha_de_publicacion_del DESC",
     }
 
-    # -------------------------------------------------
-    # CONSULTA A DATOS ABIERTOS
-    # -------------------------------------------------
-
     try:
-        async with httpx.AsyncClient(
-            timeout=20.0,
-            follow_redirects=True
-        ) as cliente:
-
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as cliente:
             respuesta = await cliente.get(
                 SECOP_DATASET_URL,
                 params=parametros,
-                headers={
-                    "Accept": "application/json"
-                }
+                headers={"Accept": "application/json"},
             )
-
             respuesta.raise_for_status()
-
             datos = respuesta.json()
 
     except httpx.TimeoutException:
-        return (
-            "Error: la consulta a SECOP II "
-            "superó el tiempo máximo de espera."
-        )
-
+        return "Error: la consulta a SECOP II superó el tiempo máximo de espera."
     except httpx.HTTPStatusError as error:
         return (
-            f"Error HTTP {error.response.status_code} "
-            "al consultar Datos Abiertos. "
+            f"Error HTTP {error.response.status_code} al consultar Datos Abiertos. "
             f"Detalle: {error.response.text[:400]}"
         )
-
     except httpx.RequestError as error:
-        return (
-            "Error de conexión con Datos Abiertos: "
-            f"{str(error)}"
-        )
-
+        return f"Error de conexión con Datos Abiertos: {error}"
     except ValueError:
         return "Error: la API no devolvió JSON válido."
-
-    # -------------------------------------------------
-    # VALIDACIÓN DE LA RESPUESTA
-    # -------------------------------------------------
 
     if not isinstance(datos, list):
         return "Error: la API devolvió un formato inesperado."
 
     if not datos:
-        return (
-            f"No se encontraron procesos para "
-            f"el término '{palabra}'."
-        )
-
-    # -------------------------------------------------
-    # FORMATEO DE RESULTADOS
-    # -------------------------------------------------
+        return f"No se encontraron procesos para el término '{palabra}'."
 
     resultados = []
-
     for proceso in datos:
-
         enlace = proceso.get("urlproceso")
-
         if isinstance(enlace, dict):
             enlace = enlace.get("url") or enlace.get("value")
 
         item = (
-            f"ENTIDAD: "
-            f"{proceso.get('entidad', 'N/A')}\n"
-
-            f"ID DEL PROCESO: "
-            f"{proceso.get('id_del_proceso', 'N/A')}\n"
-
-            f"PROCEDIMIENTO: "
-            f"{proceso.get('nombre_del_procedimiento', 'N/A')}\n"
-
-            f"OBJETO: "
-            f"{proceso.get('descripci_n_del_procedimiento', 'N/A')}\n"
-
-            f"DEPARTAMENTO: "
-            f"{proceso.get('departamento_entidad', 'N/A')}\n"
-
-            f"MODALIDAD: "
-            f"{proceso.get('modalidad_de_contratacion', 'N/A')}\n"
-
-            f"PRECIO BASE: "
-            f"${proceso.get('precio_base', 'N/A')}\n"
-
-            f"FASE: "
-            f"{proceso.get('fase', 'N/A')}\n"
-
-            f"FECHA DE PUBLICACIÓN: "
-            f"{proceso.get('fecha_de_publicacion_del', 'N/A')}\n"
-
-            f"URL DEL PROCESO: "
-            f"{enlace or 'N/A'}"
+            f"ENTIDAD: {proceso.get('entidad', 'N/A')}\n"
+            f"ID DEL PROCESO: {proceso.get('id_del_proceso', 'N/A')}\n"
+            f"PROCEDIMIENTO: {proceso.get('nombre_del_procedimiento', 'N/A')}\n"
+            f"OBJETO: {proceso.get('descripci_n_del_procedimiento', 'N/A')}\n"
+            f"DEPARTAMENTO: {proceso.get('departamento_entidad', 'N/A')}\n"
+            f"MODALIDAD: {proceso.get('modalidad_de_contratacion', 'N/A')}\n"
+            f"PRECIO BASE: ${proceso.get('precio_base', 'N/A')}\n"
+            f"FASE: {proceso.get('fase', 'N/A')}\n"
+            f"FECHA DE PUBLICACIÓN: {proceso.get('fecha_de_publicacion_del', 'N/A')}\n"
+            f"URL DEL PROCESO: {enlace or 'N/A'}"
         )
-
         resultados.append(item)
 
     return "\n\n".join(resultados)
 
 
 # =====================================================
-# 4. CONFIGURACIÓN DEL TRANSPORTE STREAMABLE HTTP
+# 4. TRANSPORTE STREAMABLE HTTP
 # =====================================================
 
 mcp_http_app = mcp.streamable_http_app()
 
 
 # =====================================================
-# 5. CICLO DE VIDA DEL SERVIDOR
+# 5. LIFESPAN
 # =====================================================
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
-
     async with mcp.session_manager.run():
         yield
 
 
 # =====================================================
-# 6. APLICACIÓN FASTAPI
+# 6. APP FASTAPI
 # =====================================================
 
 app = FastAPI(
     title="SECOP Colombia MCP Server",
     version="1.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
 )
 
 
-@app.get("/")
-async def raiz():
-
+@app.get("/health")
+async def health():
     return {
         "estado": "activo",
         "servicio": "SECOP Colombia MCP Server",
         "transporte": "Streamable HTTP",
         "endpoint_mcp": "/mcp",
-        "herramientas": [
-            "buscar_procesos_secop"
-        ]
+        "herramientas": ["buscar_procesos_secop"],
     }
 
 
 # =====================================================
-# 7. MONTAR MCP EN FASTAPI
+# 7. MONTAR MCP EN /mcp
 # =====================================================
 
+# Streamable HTTP app ya expone internamente la ruta /mcp.
+# Al montarla en /mcp, el path final queda correcto porque FastMCP
+# acepta tanto /mcp como /mcp/ cuando stateless_http=True.
 app.mount("/mcp", mcp_http_app)
+
+
+# =====================================================
+# 8. ENTRYPOINT (respeta PORT de Render)
+# =====================================================
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
