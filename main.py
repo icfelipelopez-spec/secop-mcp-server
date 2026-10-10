@@ -1,61 +1,73 @@
-from fastapi import FastAPI, HTTPException
+import os
 import httpx
+from fastapi import FastAPI
+from mcp.server.fastmcp import FastMCP
 
-app = FastAPI(title="SECOP II MCP Server", version="1.0")
+# Inicializar FastMCP
+mcp = FastMCP("SECOP II Server")
 
-SECOP_API_URL = "https://www.datos.gov.co/resource/j22f-26a3.json"
-
-@app.get("/tools/buscar_procesos")
+@mcp.tool()
 async def buscar_procesos_secop(
     entidad: str = None,
     objeto: str = None,
     modalidad: str = None,
-    limite: int = 5,
-):
-    """Busca procesos de contratación en SECOP II según filtros específicos."""
-    where_clauses = []
-
+    limite: int = 5
+) -> str:
+    """Busca procesos de contratación pública en SECOP II según filtros específicos."""
+    url = "https://www.datos.gov.co/resource/j22f-26a3.json"
+    
+    clasulas_donde = []
     if entidad:
-        where_clauses.append(f"upper(nombre_de_la_entidad) like '%{entidad.upper()}%'")
+        clasulas_donde.append(f"upper(nombre_de_la_entidad) like '%{entidad.upper()}%'")
     if objeto:
-        where_clauses.append(f"upper(objeto_del_contrato) like '%{objeto.upper()}%'")
+        clasulas_donde.append(f"upper(objeto_del_contrato) like '%{objeto.upper()}%'")
     if modalidad:
-        where_clauses.append(f"upper(modalidad_de_contratacion) like '%{modalidad.upper()}%'")
+        clasulas_donde.append(f"upper(modalidad_de_contratacion) like '%{modalidad.upper()}%'")
 
-    query_params = {
+    parametros_de_consulta = {
         "$limit": limite,
         "$order": "fecha_de_publicacion_del_proceso DESC",
     }
 
-    if where_clauses:
-        query_params["$where"] = " AND ".join(where_clauses)
+    if clasulas_donde:
+        parametros_de_consulta["$where"] = " AND ".join(clasulas_donde)
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient() as cliente:
         try:
-            response = await client.get(SECOP_API_URL, params=query_params, timeout=10.0)
-            response.raise_for_status()
-            data = response.json()
+            respuesta = await cliente.get(url, params=parametros_de_consulta, timeout=10.0)
+            respuesta.raise_for_status()
+            datos = respuesta.json()
         except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+            return f"Error al consultar la API de SECOP II: {str(e)}"
+
+    if not datos:
+        return "No se encontraron procesos de contratación con los criterios especificados."
 
     resultados = []
-    for item in data:
-        resultados.append(
-            {
-                "id_proceso": item.get("id_del_proceso"),
-                "referencia": item.get("referencia_del_proceso"),
-                "entidad": item.get("nombre_de_la_entidad"),
-                "objeto": item.get("objeto_del_contrato"),
-                "fase": item.get("fase"),
-                "precio_base": item.get("precio_base"),
-                "modalidad": item.get("modalidad_de_contratacion"),
-                "fecha_publicacion": item.get("fecha_de_publicacion_del_proceso"),
-                "url_proceso": item.get("urlproceso", {}).get("url") if isinstance(item.get("urlproceso"), dict) else item.get("urlproceso"),
-            }
+    for articulo in datos:
+        url_p = articulo.get("urlproceso")
+        link = url_p.get("url") if isinstance(url_p, dict) else url_p
+        
+        item = (
+            f"• ID Proceso: {articulo.get('id_del_proceso', 'N/A')}\n"
+            f"  Entidad: {articulo.get('nombre_de_la_entidad', 'N/A')}\n"
+            f"  Objeto: {articulo.get('objeto_del_contrato', 'N/A')}\n"
+            f"  Modalidad: {articulo.get('modalidad_de_contratacion', 'N/A')}\n"
+            f"  Cuantía/Precio Base: ${articulo.get('precio_base', 'N/A')}\n"
+            f"  Estado/Fase: {articulo.get('fase', 'N/A')}\n"
+            f"  Fecha Publicación: {articulo.get('fecha_de_publicacion_del_proceso', 'N/A')}\n"
+            f"  Enlace: {link if link else 'N/A'}"
         )
+        resultados.append(item)
 
-    return {"status": "success", "data": resultados}
+    return "\n\n".join(resultados)
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+# Crear aplicación FastAPI
+app = FastAPI(title="Servidor SECOP II MCP")
+
+@app.get("/")
+async def raiz():
+    return {"mensaje": "Servidor SECOP II MCP en vivo", "estado": "OK"}
+
+# Exponer el endpoint de MCP
+app.mount("/mcp", mcp.sse_app())
