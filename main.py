@@ -1,55 +1,28 @@
 import httpx
-from fastapi import FastAPI, Request
-from mcp.server import Server
-from mcp.server.sse import SseServerTransport
-import mcp.types as types
+from mcp.server.mcpserver import MCPServer
 
-# 1. Inicializar FastAPI y el Servidor MCP (versión compatible 1.x)
-app = FastAPI(title="SECOP II MCP Server", version="1.0.0")
-mcp_server = Server("SECOP-Colombia-Server")
+# 1. Inicializar MCPServer (clase oficial en MCP 2.x)
+mcp = MCPServer("SECOP-Colombia-Server")
 
 SECOP_II_DATASET_ID = "p6dx-8zbt"
 BASE_URL = f"https://www.datos.gov.co/resource/{SECOP_II_DATASET_ID}.json"
 
-# 2. Registrar la herramienta de SECOP II
-@mcp_server.list_tools()
-async def handle_list_tools() -> list[types.Tool]:
-    return [
-        types.Tool(
-            name="buscar_procesos_secop",
-            description="Busca y analiza procesos de contratación en SECOP II de Colombia por palabra clave.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "termino": {
-                        "type": "string",
-                        "description": "Palabra clave a buscar en el objeto del proceso (ej. 'software', 'vigilancia')."
-                    },
-                    "departamento": {
-                        "type": "string",
-                        "description": "Opcional. Filtrar por departamento (ej. 'Bogotá D.C.', 'Antioquia')."
-                    },
-                    "limite": {
-                        "type": "integer",
-                        "description": "Cantidad máxima de registros a retornar (por defecto 5)."
-                    }
-                },
-                "required": ["termino"]
-            },
-        )
-    ]
-
-@mcp_server.call_tool()
-async def handle_call_tool(name: str, arguments: dict | None) -> list[types.TextContent]:
-    if name != "buscar_procesos_secop":
-        raise ValueError(f"Herramienta desconocida: {name}")
+# 2. Definición de la Herramienta con el decorador nativo
+@mcp.tool()
+async def buscar_procesos_secop(
+    termino: str, 
+    departamento: str = None, 
+    limite: int = 5
+) -> str:
+    """
+    Busca procesos de contratación en SECOP II de Colombia por palabra clave.
     
-    args = arguments or {}
-    termino = args.get("termino", "")
-    departamento = args.get("departamento")
-    limite = args.get("limite", 5)
-
+    :param termino: Palabra clave a buscar en el objeto del proceso (ej. 'software', 'vigilancia').
+    :param departamento: Opcional. Filtrar por departamento (ej. 'Bogotá D.C.', 'Antioquia').
+    :param limite: Cantidad máxima de registros a retornar (por defecto 5).
+    """
     where_clause = f"(lower(nombre_de_la_entidad) like '%{termino.lower()}%' or lower(descripcion_del_procedimiento) like '%{termino.lower()}%')"
+    
     if departamento:
         where_clause += f" and departamento = '{departamento.upper()}'"
         
@@ -58,7 +31,10 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
         "$limit": limite,
         "$order": "fecha_de_publicacion_del_proceso DESC"
     }
-    headers = {"Accept": "application/json"}
+    
+    headers = {
+        "Accept": "application/json"
+    }
 
     async with httpx.AsyncClient() as client:
         try:
@@ -67,7 +43,7 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
             data = response.json()
             
             if not data:
-                return [types.TextContent(type="text", text=f"No se encontraron procesos recientes con el término '{termino}'.")]
+                return f"No se encontraron procesos recientes con el término '{termino}'."
             
             resultado = []
             for proceso in data:
@@ -82,31 +58,13 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
                 )
                 resultado.append(item)
                 
-            return [types.TextContent(type="text", text="\n\n".join(resultado))]
+            return "\n\n".join(resultado)
             
         except httpx.HTTPStatusError as e:
-            return [types.TextContent(type="text", text=f"Error al consultar la API de Datos Abiertos: {e.response.status_code}")]
+            return f"Error al consultar la API de Datos Abiertos: {e.response.status_code}"
         except Exception as e:
-            return [types.TextContent(type="text", text=f"Ocurrió un error inesperado: {str(e)}")]
+            return f"Ocurrió un error inesperado: {str(e)}"
 
-# 3. Configurar el transporte SSE apuntando a /sse
-sse_transport = SseServerTransport("/sse")
-
-@app.get("/")
-async def raiz():
-    return {"status": "activo", "servicio": "SECOP II MCP Server - SseServerTransport"}
-
-@app.get("/sse")
-async def handle_sse_connect(request: Request):
-    async with sse_transport.connect_sse(
-        request.scope, request.receive, request._send
-    ) as streams:
-        await mcp_server.run(
-            streams[0], streams[1], mcp_server.create_initialization_options()
-        )
-
-@app.post("/sse")
-async def handle_sse_messages(request: Request):
-    await sse_transport.handle_post_message(
-        request.scope, request.receive, request._send
-    )
+# 3. Exponer la aplicación web nativa de MCPServer
+# Esto configura automáticamente /sse y /messages sin conflictos de ASGI
+app = mcp.sse_app()
