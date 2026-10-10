@@ -1,20 +1,43 @@
 import httpx
-from fastapi import FastAPI
-from mcp.server.mcpserver import MCPServer
+from fastapi import FastAPI, Request, Response
+from mcp.server import Server
+from mcp.server.sse import SseServerTransport
+import mcp.types as types
 
-# Inicializar MCPServer con el nombre exacto
-mcp = MCPServer("SECOP_FL")
+app = FastAPI(title="SECOP II MCP Server")
 
-@mcp.tool()
-async def buscar_procesos_secop(
-    entidad: str = None,
-    objeto: str = None,
-    modalidad: str = None,
-    limite: int = 5
-) -> str:
-    """Busca procesos de contratación pública en Colombia en la base de datos abierta de SECOP II."""
+# Inicializar servidor MCP oficial
+server = Server("SECOP_FL")
+
+@server.list_tools()
+async def handle_list_tools() -> list[types.Tool]:
+    return [
+        types.Tool(
+            name="buscar_procesos_secop",
+            description="Busca procesos de contratación pública en Colombia en la base de datos abierta de SECOP II.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "entidad": {"type": "string", "description": "Nombre o parte del nombre de la entidad estatal"},
+                    "objeto": {"type": "string", "description": "Palabra clave en el objeto del contrato"},
+                    "modalidad": {"type": "string", "description": "Modalidad de contratación"},
+                    "limite": {"type": "integer", "description": "Número máximo de resultados", "default": 5}
+                }
+            }
+        )
+    ]
+
+@server.call_tool()
+async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent]:
+    if name != "buscar_procesos_secop":
+        raise ValueError(f"Herramienta desconocida: {name}")
+
+    entidad = arguments.get("entidad")
+    objeto = arguments.get("objeto")
+    modalidad = arguments.get("modalidad")
+    limite = arguments.get("limite", 5)
+
     url = "https://www.datos.gov.co/resource/j22f-26a3.json"
-    
     clasulas_donde = []
     if entidad:
         clasulas_donde.append(f"upper(nombre_de_la_entidad) like '%{entidad.upper()}%'")
@@ -27,7 +50,6 @@ async def buscar_procesos_secop(
         "$limit": limite,
         "$order": "fecha_de_publicacion_del_proceso DESC",
     }
-
     if clasulas_donde:
         parametros_de_consulta["$where"] = " AND ".join(clasulas_donde)
 
@@ -37,10 +59,10 @@ async def buscar_procesos_secop(
             respuesta.raise_for_status()
             datos = respuesta.json()
         except Exception as e:
-            return f"Error al consultar la API de SECOP II: {str(e)}"
+            return [types.TextContent(type="text", text=f"Error al consultar la API de SECOP II: {str(e)}")]
 
     if not datos:
-        return "No se encontraron procesos de contratación con los criterios especificados."
+        return [types.TextContent(type="text", text="No se encontraron procesos de contratación con los criterios especificados.")]
 
     resultados = []
     for articulo in datos:
@@ -59,14 +81,21 @@ async def buscar_procesos_secop(
         )
         resultados.append(item)
 
-    return "\n\n".join(resultados)
+    return [types.TextContent(type="text", text="\n\n".join(resultados))]
 
-# Crear la aplicación FastAPI
-app = FastAPI(title="SECOP II MCP Server")
+# Configurar transporte SSE oficial
+sse = SseServerTransport("/mcp/messages")
+
+@app.get("/mcp/sse")
+async def handle_sse(request: Request):
+    async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
+        await server.run(streams[0], streams[1], server.create_initialization_options())
+
+@app.post("/mcp/messages")
+async def handle_messages(request: Request):
+    await sse.handle_post_message(request.scope, request.receive, request._send)
+    return Response(status_code=200)
 
 @app.get("/")
 async def raiz():
-    return {"estado": "activo", "servicio": "MCP SSE Bridge"}
-
-# Montar la aplicación MCP en el endpoint SSE esperado
-app.mount("/mcp", mcp.sse_app())
+    return {"estado": "activo", "servicio": "SECOP II MCP SSE Server"}
