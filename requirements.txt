@@ -1,4 +1,4 @@
 fastapi
-uvicorn
+uvicorn[standard]
 httpx
-mcp
+mcp>=1.29.1,<2
