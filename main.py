@@ -1,10 +1,10 @@
 import httpx
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request
 from mcp.server import Server
 from mcp.server.sse import SseServerTransport
 import mcp.types as types
 
-# 1. Inicializar la app de FastAPI y el servidor MCP de la versión 1.x
+# 1. Inicializar FastAPI y el Servidor MCP (versión compatible 1.x)
 app = FastAPI(title="SECOP II MCP Server", version="1.0.0")
 mcp_server = Server("SECOP-Colombia-Server")
 
@@ -104,11 +104,9 @@ async def handle_sse_connect(request: Request):
         await mcp_server.run(
             streams[0], streams[1], mcp_server.create_initialization_options()
         )
-    return Response(status_code=200)
 
 @app.post("/sse")
 async def handle_sse_messages(request: Request):
     await sse_transport.handle_post_message(
         request.scope, request.receive, request._send
     )
-    return Response(status_code=200)
