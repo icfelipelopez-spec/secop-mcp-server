@@ -6,7 +6,6 @@ import mcp.types as types
 
 app = FastAPI(title="SECOP II MCP Server", version="1.0.0")
 
-# Inicializar servidor MCP estándar
 server = Server("SECOP_FL")
 
 @server.list_tools()
@@ -95,15 +94,15 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
 
     return [types.TextContent(type="text", text="\n\n".join(resultados))]
 
-# Configurar el transporte SSE apuntando explícitamente a la ruta de mensajes POST
-sse = SseServerTransport("/mcp/messages")
+# Configurar el transporte apuntando a la misma ruta /mcp/sse para GET y POST
+sse = SseServerTransport("/mcp/sse")
 
 @app.get("/mcp/sse")
 async def handle_sse(request: Request):
     async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
         await server.run(streams[0], streams[1], server.create_initialization_options())
 
-@app.post("/mcp/messages")
+@app.post("/mcp/sse")
 async def handle_messages(request: Request):
     await sse.handle_post_message(request.scope, request.receive, request._send)
     return Response(status_code=200)
