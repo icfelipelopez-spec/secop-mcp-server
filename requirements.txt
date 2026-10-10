@@ -1,4 +1,4 @@
 fastapi
 uvicorn[standard]
 httpx
-mcp>=2.0.0,<3
+mcp>=1.2.0,<2.0.0
