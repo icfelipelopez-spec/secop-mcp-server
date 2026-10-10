@@ -1,101 +1,151 @@
 import httpx
-from fastapi import FastAPI, Request, Response
-from mcp.server import Server
-from mcp.server.sse import SseServerTransport
-import mcp.types as types
+from fastapi import FastAPI
+from mcp.server.fastmcp import FastMCP
 
-app = FastAPI(title="SECOP II MCP Server")
+# =========================================================
+# CONFIGURACIÓN
+# =========================================================
 
-# Inicializar servidor MCP oficial
-server = Server("SECOP_FL")
+mcp = FastMCP("SECOP_FL")
 
-@server.list_tools()
-async def handle_list_tools() -> list[types.Tool]:
-    return [
-        types.Tool(
-            name="buscar_procesos_secop",
-            description="Busca procesos de contratación pública en Colombia en la base de datos abierta de SECOP II.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "entidad": {"type": "string", "description": "Nombre o parte del nombre de la entidad estatal"},
-                    "objeto": {"type": "string", "description": "Palabra clave en el objeto del contrato"},
-                    "modalidad": {"type": "string", "description": "Modalidad de contratación"},
-                    "limite": {"type": "integer", "description": "Número máximo de resultados", "default": 5}
-                }
-            }
-        )
-    ]
+SECOP_API_URL = "https://www.datos.gov.co/resource/p6dx-8zbt.json"
 
-@server.call_tool()
-async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent]:
-    if name != "buscar_procesos_secop":
-        raise ValueError(f"Herramienta desconocida: {name}")
+# =========================================================
+# UTILIDADES
+# =========================================================
 
-    entidad = arguments.get("entidad")
-    objeto = arguments.get("objeto")
-    modalidad = arguments.get("modalidad")
-    limite = arguments.get("limite", 5)
+def escapar_soql(valor: str) -> str:
+    """
+    Escapa comillas simples para utilizarlas
+    dentro de literales de texto SoQL.
+    """
+    return valor.replace("'", "''")
 
-    url = "https://www.datos.gov.co/resource/j22f-26a3.json"
-    clasulas_donde = []
-    if entidad:
-        clasulas_donde.append(f"upper(nombre_de_la_entidad) like '%{entidad.upper()}%'")
-    if objeto:
-        clasulas_donde.append(f"upper(objeto_del_contrato) like '%{objeto.upper()}%'")
-    if modalidad:
-        clasulas_donde.append(f"upper(modalidad_de_contratacion) like '%{modalidad.upper()}%'")
 
-    parametros_de_consulta = {
+def construir_filtro(campo: str, valor: str) -> str:
+    """
+    Construye un filtro LIKE con el valor escapado.
+    Los nombres de campo deben ser constantes internas.
+    """
+    valor_seguro = escapar_soql(valor.upper())
+    return f"upper({campo}) like '%{valor_seguro}%'"
+
+
+# =========================================================
+# HERRAMIENTA MCP
+# =========================================================
+
+@mcp.tool()
+async def buscar_procesos_secop(
+    entidad: str | None = None,
+    objeto: str | None = None,
+    modalidad: str | None = None,
+    limite: int = 5
+) -> str:
+    """
+    Busca procesos de contratación pública en SECOP II.
+
+    Parámetros:
+    - entidad: nombre o fragmento del nombre de la entidad.
+    - objeto: texto que identifica el objeto del proceso.
+    - modalidad: modalidad de contratación.
+    - limite: cantidad máxima de resultados, entre 1 y 100.
+    """
+
+    if not isinstance(limite, int) or isinstance(limite, bool):
+        return "Error: el límite debe ser un número entero."
+
+    limite = max(1, min(limite, 100))
+    filtros = []
+
+    if entidad and entidad.strip():
+        filtros.append(construir_filtro("entidad", entidad.strip()))
+
+    if objeto and objeto.strip():
+        filtros.append(construir_filtro("descripci_n_del_procedimiento", objeto.strip()))
+
+    if modalidad and modalidad.strip():
+        filtros.append(construir_filtro("modalidad_de_contratacion", modalidad.strip()))
+
+    parametros = {
         "$limit": limite,
-        "$order": "fecha_de_publicacion_del_proceso DESC",
+        "$order": "fecha_de_publicacion_del DESC",
     }
-    if clasulas_donde:
-        parametros_de_consulta["$where"] = " AND ".join(clasulas_donde)
 
-    async with httpx.AsyncClient() as cliente:
-        try:
-            respuesta = await cliente.get(url, params=parametros_de_consulta, timeout=15.0)
+    if filtros:
+        parametros["$where"] = " AND ".join(filtros)
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=20.0,
+            follow_redirects=True
+        ) as cliente:
+            respuesta = await cliente.get(
+                SECOP_API_URL,
+                params=parametros
+            )
             respuesta.raise_for_status()
             datos = respuesta.json()
-        except Exception as e:
-            return [types.TextContent(type="text", text=f"Error al consultar la API de SECOP II: {str(e)}")]
+
+            if not isinstance(datos, list):
+                return "Error: la API de SECOP II devolvió una respuesta inesperada."
+
+    except httpx.TimeoutException:
+        return "Error: la consulta a SECOP II superó el tiempo máximo de espera."
+
+    except httpx.HTTPStatusError as exc:
+        return f"Error HTTP al consultar SECOP II: {exc.response.status_code}. Verifica los filtros y el conjunto de datos."
+
+    except httpx.RequestError as exc:
+        return f"Error de conexión con SECOP II: {str(exc)}"
+
+    except ValueError:
+        return "Error: la respuesta de SECOP II no contiene JSON válido."
 
     if not datos:
-        return [types.TextContent(type="text", text="No se encontraron procesos de contratación con los criterios especificados.")]
+        return "No se encontraron procesos con los criterios especificados."
 
     resultados = []
     for articulo in datos:
-        url_p = articulo.get("urlproceso")
-        link = url_p.get("url") if isinstance(url_p, dict) else url_p
-        
+        url_proceso = articulo.get("urlproceso")
+        if isinstance(url_proceso, dict):
+            enlace = url_proceso.get("url") or url_proceso.get("value")
+        else:
+            enlace = url_proceso
+
         item = (
-            f"• ID Proceso: {articulo.get('id_del_proceso', 'N/A')}\n"
-            f"  Entidad: {articulo.get('nombre_de_la_entidad', 'N/A')}\n"
-            f"  Objeto: {articulo.get('objeto_del_contrato', 'N/A')}\n"
-            f"  Modalidad: {articulo.get('modalidad_de_contratacion', 'N/A')}\n"
-            f"  Cuantía/Precio Base: ${articulo.get('precio_base', 'N/A')}\n"
-            f"  Estado/Fase: {articulo.get('fase', 'N/A')}\n"
-            f"  Fecha Publicación: {articulo.get('fecha_de_publicacion_del_proceso', 'N/A')}\n"
-            f"  Enlace: {link if link else 'N/A'}"
+            f"ID del proceso: {articulo.get('id_del_proceso', 'N/A')}\n"
+            f"Entidad: {articulo.get('entidad', 'N/A')}\n"
+            f"Procedimiento: {articulo.get('nombre_del_procedimiento', 'N/A')}\n"
+            f"Objeto: {articulo.get('descripci_n_del_procedimiento', 'N/A')}\n"
+            f"Modalidad: {articulo.get('modalidad_de_contratacion', 'N/A')}\n"
+            f"Precio base: ${articulo.get('precio_base', 'N/A')}\n"
+            f"Fase: {articulo.get('fase', 'N/A')}\n"
+            f"Fecha de publicación: {articulo.get('fecha_de_publicacion_del', 'N/A')}\n"
+            f"Enlace: {enlace or 'N/A'}"
         )
         resultados.append(item)
 
-    return [types.TextContent(type="text", text="\n\n".join(resultados))]
+    return "\n\n".join(resultados)
 
-# Configurar transporte SSE oficial
-sse = SseServerTransport("/mcp/messages")
 
-@app.get("/mcp/sse")
-async def handle_sse(request: Request):
-    async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
-        await server.run(streams[0], streams[1], server.create_initialization_options())
+# =========================================================
+# APLICACIÓN FASTAPI
+# =========================================================
 
-@app.post("/mcp/messages")
-async def handle_messages(request: Request):
-    await sse.handle_post_message(request.scope, request.receive, request._send)
-    return Response(status_code=200)
+app = FastAPI(
+    title="SECOP II MCP Server",
+    version="1.0.0"
+)
+
 
 @app.get("/")
 async def raiz():
-    return {"estado": "activo", "servicio": "SECOP II MCP SSE Server"}
+    return {
+        "estado": "activo",
+        "servicio": "SECOP II MCP Server"
+    }
+
+
+# Transporte SSE
+app.mount("/mcp", mcp.sse_app())
