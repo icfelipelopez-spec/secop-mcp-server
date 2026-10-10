@@ -1,13 +1,13 @@
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request
 from mcp.server import Server
 from mcp.server.sse import SseServerTransport
 import mcp.types as types
 
-# 1. Inicializar el servidor MCP y la app de FastAPI
+# 1. Inicializar FastAPI y el Servidor MCP
 app = FastAPI(title="SECOP II MCP Server", version="1.0.0")
 mcp_server = Server("secop-mcp-server")
 
-# 2. Registrar las herramientas del servidor
+# 2. Registrar la herramienta de SECOP II
 @mcp_server.list_tools()
 async def handle_list_tools() -> list[types.Tool]:
     return [
@@ -39,9 +39,9 @@ sse_transport = SseServerTransport("/mcp/sse")
 
 @app.get("/")
 async def raiz():
-    return {"status": "activo", "servicio": "SECOP II MCP Server - Socrata API"}
+    return {"status": "activo", "servicio": "SECOP II MCP Server - SseServerTransport"}
 
-# 4. Endpoint GET para el flujo SSE
+# 4. Endpoint GET para el flujo SSE (sin retornar Response extra)
 @app.get("/mcp/sse")
 async def handle_sse_connect(request: Request):
     async with sse_transport.connect_sse(
@@ -50,12 +50,14 @@ async def handle_sse_connect(request: Request):
         await mcp_server.run(
             streams[0], streams[1], mcp_server.create_initialization_options()
         )
-    return Response(status_code=200)
 
-# 5. Endpoint POST para recibir los mensajes del cliente
+# 5. Endpoint POST para recibir mensajes (sin retornar Response extra)
 @app.post("/mcp/sse")
 async def handle_sse_messages(request: Request):
     await sse_transport.handle_post_message(
         request.scope, request.receive, request._send
     )
-    return Response(status_code=200)
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
