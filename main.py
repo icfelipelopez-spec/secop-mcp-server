@@ -1,10 +1,10 @@
 import os
 import httpx
 from fastapi import FastAPI
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
-# Inicializar FastMCP
-mcp = FastMCP("SECOP II Server")
+# Inicializar MCPServer (Sintaxis compatible con mcp 2.x)
+mcp = MCPServer("SECOP II Server")
 
 @mcp.tool()
 async def buscar_procesos_secop(
