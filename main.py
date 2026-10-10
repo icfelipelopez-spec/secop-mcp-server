@@ -1,26 +1,49 @@
 import httpx
-from fastapi import FastAPI
-from mcp.server.fastmcp import FastMCP
+from fastapi import FastAPI, Request
+from starlette.routing import Route
+from mcp.server import Server
+from mcp.server.sse import SseServerTransport
+import mcp.types as types
 
-# Inicializar FastMCP nativo (compatible con la versión 1.x instalada)
-mcp = FastMCP("SECOP_FL")
+# =========================================================
+# SERVIDOR MCP Y HERRAMIENTAS
+# =========================================================
 
-SECOP_API_URL = "https://www.datos.gov.co/resource/p6dx-8zbt.json"
+server = Server("SECOP_FL")
 
-@mcp.tool()
-async def buscar_procesos_secop(
-    entidad: str | None = None,
-    objeto: str | None = None,
-    modalidad: str | None = None,
-    limite: int = 5
-) -> str:
-    """
-    Busca procesos de contratación pública en Colombia en la base de datos abierta de SECOP II.
-    """
+@server.list_tools()
+async def handle_list_tools() -> list[types.Tool]:
+    return [
+        types.Tool(
+            name="buscar_procesos_secop",
+            description="Busca procesos de contratación pública en Colombia en la base de datos abierta de SECOP II.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "entidad": {"type": "string", "description": "Nombre o parte del nombre de la entidad estatal"},
+                    "objeto": {"type": "string", "description": "Palabra clave en la descripción del procedimiento"},
+                    "modalidad": {"type": "string", "description": "Modalidad de contratación"},
+                    "limite": {"type": "integer", "description": "Número máximo de resultados (1-100)", "default": 5}
+                }
+            }
+        )
+    ]
+
+@server.call_tool()
+async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent]:
+    if name != "buscar_procesos_secop":
+        raise ValueError(f"Herramienta desconocida: {name}")
+
+    entidad = arguments.get("entidad")
+    objeto = arguments.get("objeto")
+    modalidad = arguments.get("modalidad")
+    limite = arguments.get("limite", 5)
+
     if not isinstance(limite, int) or isinstance(limite, bool):
-        return "Error: el límite debe ser un número entero."
-
+        return [types.TextContent(type="text", text="Error: el límite debe ser un número entero.")]
     limite = max(1, min(limite, 100))
+
+    url = "https://www.datos.gov.co/resource/p6dx-8zbt.json"
     filtros = []
 
     if entidad and entidad.strip():
@@ -42,14 +65,15 @@ async def buscar_procesos_secop(
 
     async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as cliente:
         try:
-            respuesta = await cliente.get(SECOP_API_URL, params=parametros)
+            respuesta = await cliente.get(url, params=parametros)
             respuesta.raise_for_status()
             datos = respuesta.json()
         except Exception as e:
-            return f"Error al consultar la API de SECOP II: {str(e)}"
+            error_msg = e.response.status_code if isinstance(e, httpx.HTTPStatusError) else str(e)
+            return [types.TextContent(type="text", text=f"Error al consultar la API de SECOP II: {error_msg}")]
 
     if not datos or not isinstance(datos, list):
-        return "No se encontraron procesos de contratación con los criterios especificados."
+        return [types.TextContent(type="text", text="No se encontraron procesos de contratación con los criterios especificados.")]
 
     resultados = []
     for articulo in datos:
@@ -72,14 +96,30 @@ async def buscar_procesos_secop(
         )
         resultados.append(item)
 
-    return "\n\n".join(resultados)
+    return [types.TextContent(type="text", text="\n\n".join(resultados))]
 
-# Configuración de FastAPI
-app = FastAPI(title="SECOP II MCP Server", version="1.0.0")
+# =========================================================
+# TRANSPORTE Y RUTAS ASGI
+# =========================================================
 
-@app.get("/")
-async def raiz():
+# Configurar transporte apuntando a /mcp/sse
+sse = SseServerTransport("/mcp/sse")
+
+async def handle_sse(request: Request):
+    async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
+        await server.run(streams[0], streams[1], server.create_initialization_options())
+
+async def raiz(request: Request):
     return {"estado": "activo", "servicio": "SECOP II MCP Server"}
 
-# Montaje oficial y limpio de FastMCP (evita conflictos en rutas SSE y POST)
-app.mount("/mcp", mcp.sse_app())
+# Definición de la aplicación FastAPI con enrutamiento Starlette nativo
+# para evitar conflictos de ciclo de vida ASGI en peticiones POST
+app = FastAPI(
+    title="SECOP II MCP Server",
+    version="1.0.0",
+    routes=[
+        Route("/", raiz, methods=["GET"]),
+        Route("/mcp/sse", handle_sse, methods=["GET"]),
+        Route("/mcp/sse", sse.handle_post_message, methods=["POST"]),
+    ]
+)
