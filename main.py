@@ -1,44 +1,61 @@
 from fastapi import FastAPI, Request, Response
-from mcp.server.fastmcp import FastMCP
+from mcp.server import Server
 from mcp.server.sse import SseServerTransport
 import mcp.types as types
 
-# 1. Crear la instancia de FastMCP con el nombre de tu servicio
-mcp = FastMCP("SECOP-Colombia-Server")
-
-# 2. Definir las herramientas del servidor (ej. consulta de procesos en SECOP II)
-@mcp.tool()
-async def buscar_procesos_secop(termino: str) -> str:
-    """Busca procesos de contratación en SECOP II."""
-    # Aquí puedes integrar la lógica de consulta (Socrata API, scraping o análisis local)
-    return f"Resultados estructurados para el proceso o término: {termino}"
-
-# 3. Inicializar la aplicación principal de FastAPI
+# 1. Inicializar el servidor MCP y la app de FastAPI
 app = FastAPI(title="SECOP II MCP Server", version="1.0.0")
+mcp_server = Server("secop-mcp-server")
 
-# 4. Configurar el transporte SSE apuntando explícitamente a la ruta de conexión
+# 2. Registrar las herramientas del servidor
+@mcp_server.list_tools()
+async def handle_list_tools() -> list[types.Tool]:
+    return [
+        types.Tool(
+            name="buscar_procesos_secop",
+            description="Busca y analiza procesos de contratación en SECOP II.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "termino": {
+                        "type": "string",
+                        "description": "Término o número de proceso a consultar",
+                    }
+                },
+                "required": ["termino"],
+            },
+        )
+    ]
+
+@mcp_server.call_tool()
+async def handle_call_tool(name: str, arguments: dict | None) -> list[types.TextContent]:
+    if name == "buscar_procesos_secop":
+        termino = arguments.get("termino", "") if arguments else ""
+        return [types.TextContent(type="text", text=f"Resultados para el proceso: {termino}")]
+    raise ValueError(f"Herramienta desconocida: {name}")
+
+# 3. Configurar el transporte SSE
 sse_transport = SseServerTransport("/mcp/sse")
 
 @app.get("/")
 async def raiz():
-    """Health check básico para verificar el estado de la aplicación en Render."""
-    return {"status": "activo", "servicio": "SECOP II MCP Server - SseServerTransport"}
+    return {"status": "activo", "servicio": "SECOP II MCP Server - Socrata API"}
 
-# 5. Endpoint GET para establecer la conexión inicial por Stream (SSE)
+# 4. Endpoint GET para el flujo SSE
 @app.get("/mcp/sse")
 async def handle_sse_connect(request: Request):
-    """Maneja el flujo de eventos enviados por el servidor (Server-Sent Events)."""
-    async with sse_transport.connect_handle(request.scope, request.receive, request._send) as queue:
-        await sse_transport.handle_sse_request(request, queue)
+    async with sse_transport.connect_sse(
+        request.scope, request.receive, request._send
+    ) as streams:
+        await mcp_server.run(
+            streams[0], streams[1], mcp_server.create_initialization_options()
+        )
     return Response(status_code=200)
 
-# 6. Endpoint POST para recibir los comandos, llamadas a herramientas y mensajes del cliente
+# 5. Endpoint POST para recibir los mensajes del cliente
 @app.post("/mcp/sse")
 async def handle_sse_messages(request: Request):
-    """Procesa las peticiones POST enviadas por el cliente MCP evitando el error 405."""
-    await sse_transport.handle_post_request(request)
+    await sse_transport.handle_post_message(
+        request.scope, request.receive, request._send
+    )
     return Response(status_code=200)
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
