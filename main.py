@@ -1,5 +1,5 @@
 import httpx
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request
 from mcp.server import Server
 from mcp.server.sse import SseServerTransport
 import mcp.types as types
@@ -94,18 +94,18 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
 
     return [types.TextContent(type="text", text="\n\n".join(resultados))]
 
-# Configurar el transporte apuntando a la misma ruta /mcp/sse para GET y POST
-sse = SseServerTransport("/mcp/sse")
+# Inicializar el transporte SSE especificando la ruta de mensajes POST separada
+sse = SseServerTransport("/mcp/messages")
 
 @app.get("/mcp/sse")
 async def handle_sse(request: Request):
     async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
         await server.run(streams[0], streams[1], server.create_initialization_options())
 
-@app.post("/mcp/sse")
+@app.post("/mcp/messages")
 async def handle_messages(request: Request):
-    await sse.handle_post_message(request.scope, request.receive, request._send)
-    return Response(status_code=200)
+    async with sse.connect_ppo(request.scope, request.receive, request._send):
+        pass
 
 @app.get("/")
 async def raiz():
