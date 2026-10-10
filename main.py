@@ -2,33 +2,8 @@ import httpx
 from fastapi import FastAPI
 from mcp.server.fastmcp import FastMCP
 
-# =========================================================
-# CONFIGURACIÓN
-# =========================================================
-
 mcp = FastMCP("SECOP_FL")
-
 SECOP_API_URL = "https://www.datos.gov.co/resource/p6dx-8zbt.json"
-
-
-# =========================================================
-# UTILIDADES
-# =========================================================
-
-def escapar_soql(valor: str) -> str:
-    """Escapa comillas simples para literales SoQL."""
-    return valor.replace("'", "''")
-
-
-def construir_filtro(campo: str, valor: str) -> str:
-    """Construye un filtro LIKE con el valor escapado."""
-    valor_seguro = escapar_soql(valor.upper())
-    return f"upper({campo}) like '%{valor_seguro}%'"
-
-
-# =========================================================
-# HERRAMIENTA MCP
-# =========================================================
 
 @mcp.tool()
 async def buscar_procesos_secop(
@@ -37,16 +12,7 @@ async def buscar_procesos_secop(
     modalidad: str | None = None,
     limite: int = 5
 ) -> str:
-    """
-    Busca procesos de contratación pública en SECOP II.
-
-    Parámetros:
-    - entidad: nombre o fragmento del nombre de la entidad.
-    - objeto: texto que identifica el objeto del proceso.
-    - modalidad: modalidad de contratación.
-    - limite: cantidad máxima de resultados, entre 1 y 100.
-    """
-
+    """Busca procesos de contratación pública en SECOP II."""
     if not isinstance(limite, int) or isinstance(limite, bool):
         return "Error: el límite debe ser un número entero."
 
@@ -54,50 +20,31 @@ async def buscar_procesos_secop(
     filtros = []
 
     if entidad and entidad.strip():
-        filtros.append(construir_filtro("entidad", entidad.strip()))
-
+        val = entidad.strip().upper().replace("'", "''")
+        filtros.append(f"upper(entidad) like '%{val}%'")
     if objeto and objeto.strip():
-        filtros.append(construir_filtro("descripci_n_del_procedimiento", objeto.strip()))
-
+        val = objeto.strip().upper().replace("'", "''")
+        filtros.append(f"upper(descripci_n_del_procedimiento) like '%{val}%'")
     if modalidad and modalidad.strip():
-        filtros.append(construir_filtro("modalidad_de_contratacion", modalidad.strip()))
+        val = modalidad.strip().upper().replace("'", "''")
+        filtros.append(f"upper(modalidad_de_contratacion) like '%{val}%'")
 
     parametros = {
         "$limit": limite,
         "$order": "fecha_de_publicacion_del DESC",
     }
-
     if filtros:
         parametros["$where"] = " AND ".join(filtros)
 
-    try:
-        async with httpx.AsyncClient(
-            timeout=20.0,
-            follow_redirects=True
-        ) as cliente:
-            respuesta = await cliente.get(
-                SECOP_API_URL,
-                params=parametros
-            )
+    async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as cliente:
+        try:
+            respuesta = await cliente.get(SECOP_API_URL, params=parametros)
             respuesta.raise_for_status()
             datos = respuesta.json()
+        except Exception as e:
+            return f"Error al consultar la API de SECOP II: {str(e)}"
 
-            if not isinstance(datos, list):
-                return "Error: la API de SECOP II devolvió una respuesta inesperada."
-
-    except httpx.TimeoutException:
-        return "Error: la consulta a SECOP II superó el tiempo máximo de espera."
-
-    except httpx.HTTPStatusError as exc:
-        return f"Error HTTP al consultar SECOP II: {exc.response.status_code}. Verifica los filtros."
-
-    except httpx.RequestError as exc:
-        return f"Error de conexión con SECOP II: {str(exc)}"
-
-    except ValueError:
-        return "Error: la respuesta de SECOP II no contiene JSON válido."
-
-    if not datos:
+    if not datos or not isinstance(datos, list):
         return "No se encontraron procesos con los criterios especificados."
 
     resultados = []
@@ -123,24 +70,10 @@ async def buscar_procesos_secop(
 
     return "\n\n".join(resultados)
 
-
-# =========================================================
-# APLICACIÓN FASTAPI
-# =========================================================
-
-app = FastAPI(
-    title="SECOP II MCP Server",
-    version="1.0.0"
-)
-
+app = FastAPI(title="SECOP II MCP Server", version="1.0.0")
 
 @app.get("/")
 async def raiz():
-    return {
-        "estado": "activo",
-        "servicio": "SECOP II MCP Server"
-    }
+    return {"estado": "activo", "servicio": "SECOP II MCP Server"}
 
-
-# Montar las rutas nativas SSE que FastMCP maneja internamente
 app.mount("/mcp", mcp.sse_app())
