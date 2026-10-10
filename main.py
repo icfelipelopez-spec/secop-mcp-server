@@ -6,15 +6,34 @@ import uvicorn
 
 from fastapi import FastAPI
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 
 # =====================================================
 # 1. CONFIGURACIÓN DEL SERVIDOR MCP
 # =====================================================
 
+_render_host = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "").strip()
+_extra = os.environ.get("MCP_ALLOWED_HOSTS", "")
+HOSTS_PERMITIDOS = [
+    h.strip()
+    for h in [_render_host, *_extra.split(","), "localhost:*", "127.0.0.1:*"]
+    if h and h.strip()
+]
+
 mcp = FastMCP(
     "SECOP-Colombia-Server",
-    stateless_http=True,   # 🔑 Clave para clientes como Composio
+    stateless_http=True,      # Clave para Composio (sin sesión persistente)
+    json_response=True,       # Respuestas JSON simples (sin SSE)
+    streamable_http_path="/", # La sub-app responde en su raíz
+    transport_security=TransportSecuritySettings(
+        # Protección DNS rebinding ACTIVA; solo se autorizan los hosts
+        # propios. Render define RENDER_EXTERNAL_HOSTNAME automáticamente
+        # (p. ej. secop-mcp-server.onrender.com). Sin esto: 421.
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=HOSTS_PERMITIDOS,
+        allowed_origins=[f"https://{h}" for h in HOSTS_PERMITIDOS],
+    ),
 )
 
 SECOP_DATASET_URL = "https://www.datos.gov.co/resource/p6dx-8zbt.json"
@@ -180,10 +199,10 @@ async def buscar_procesos_secop(
 # =====================================================
 # 4. TRANSPORTE STREAMABLE HTTP
 # =====================================================
-# path="/" hace que la sub-app MCP responda en su raíz.
-# Al montarla en /mcp, la ruta final es /mcp (sin redirect).
+# streamable_http_path="/" (arriba) hace que la sub-app responda en su raíz.
+# Se monta en /mcp; el middleware de abajo evita el redirect 307 /mcp -> /mcp/.
 
-mcp_http_app = mcp.streamable_http_app(path="/")
+mcp_http_app = mcp.streamable_http_app()
 
 
 # =====================================================
@@ -222,6 +241,15 @@ async def health():
 # =====================================================
 # 7. MONTAR MCP EN FASTAPI
 # =====================================================
+
+@app.middleware("http")
+async def sin_redirect_mcp(request, call_next):
+    """Reescribe /mcp a /mcp/ internamente (POST no sigue bien un 307)."""
+    if request.scope["path"] == "/mcp":
+        request.scope["path"] = "/mcp/"
+        request.scope["raw_path"] = b"/mcp/"
+    return await call_next(request)
+
 
 app.mount("/mcp", mcp_http_app)
 

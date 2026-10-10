@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: secop-mcp-server
+    runtime: python
+    plan: free            # Cambie a "starter" para evitar el apagado por inactividad
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.7"
