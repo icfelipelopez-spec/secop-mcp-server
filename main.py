@@ -1,63 +1,74 @@
-from fastapi import FastAPI, Request
-from mcp.server import Server
-from mcp.server.sse import SseServerTransport
-import mcp.types as types
+import httpx
+from fastapi import FastAPI
+from mcp.server.fastmcp import FastMCP
 
-# 1. Inicializar FastAPI y el Servidor MCP
-app = FastAPI(title="SECOP II MCP Server", version="1.0.0")
-mcp_server = Server("secop-mcp-server")
+# 1. Inicializar FastMCP con el nombre de tu servidor
+mcp = FastMCP("SECOP-Colombia-Server")
 
-# 2. Registrar la herramienta de SECOP II
-@mcp_server.list_tools()
-async def handle_list_tools() -> list[types.Tool]:
-    return [
-        types.Tool(
-            name="buscar_procesos_secop",
-            description="Busca y analiza procesos de contratación en SECOP II.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "termino": {
-                        "type": "string",
-                        "description": "Término o número de proceso a consultar",
-                    }
-                },
-                "required": ["termino"],
-            },
-        )
-    ]
+# ID oficial del Dataset de SECOP II en datos.gov.co
+SECOP_II_DATASET_ID = "p6dx-8zbt"
+BASE_URL = f"https://datos.gov.co{SECOP_II_DATASET_ID}.json"
 
-@mcp_server.call_tool()
-async def handle_call_tool(name: str, arguments: dict | None) -> list[types.TextContent]:
-    if name == "buscar_procesos_secop":
-        termino = arguments.get("termino", "") if arguments else ""
-        return [types.TextContent(type="text", text=f"Resultados para el proceso: {termino}")]
-    raise ValueError(f"Herramienta desconocida: {name}")
+# 2. Definición de la Herramienta (Tool) para el LLM
+@mcp.tool()
+async def buscar_procesos_secop(
+    termino: str, 
+    departamento: str = None, 
+    limite: int = 5
+) -> str:
+    """
+    Busca procesos de contratación en SECOP II de Colombia por palabra clave.
+    
+    :param termino: Palabra clave a buscar en el objeto del proceso (ej. 'software', 'vigilancia').
+    :param departamento: Opcional. Filtrar por departamento (ej. 'Bogotá D.C.', 'Antioquia').
+    :param limite: Cantidad máxima de registros a retornar (por defecto 5).
+    """
+    # Construcción de la consulta SoQL para la API de Socrata
+    where_clause = f"(lower(nombre_de_la_entidad) like '%{termino.lower()}%' or lower(descripcion_del_procedimiento) like '%{termino.lower()}%')"
+    
+    if departamento:
+        where_clause += f" and departamento = '{departamento.upper()}'"
+        
+    params = {
+        "$where": where_clause,
+        "$limit": limite,
+        "$order": "fecha_de_publicacion_del_proceso DESC"
+    }
+    
+    headers = {
+        "Accept": "application/json"
+    }
 
-# 3. Configurar el transporte SSE
-sse_transport = SseServerTransport("/mcp/sse")
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(BASE_URL, params=params, headers=headers, timeout=15.0)
+            response.raise_for_status()
+            data = response.json()
+            
+            if not data:
+                return f"No se encontraron procesos recientes con el término '{termino}'."
+            
+            resultado = []
+            for proceso in data:
+                item = (
+                    f"🏢 **Entidad:** {proceso.get('nombre_de_la_entidad')}\n"
+                    f"🆔 **ID Proceso:** {proceso.get('id_del_proceso')}\n"
+                    f"📝 **Objeto:** {proceso.get('descripcion_del_procedimiento')}\n"
+                    f"💰 **Valor Estimado:** ${proceso.get('precio_base', 'No definido')}\n"
+                    f"📌 **Fase:** {proceso.get('fase', 'N/A')} | **Estado:** {proceso.get('estado_del_procedimiento')}\n"
+                    f"📅 **Publicación:** {proceso.get('fecha_de_publicacion_del_proceso', 'N/A')}\n"
+                    f"🔗 [Ver en SECOP](https://secop.gov.co{proceso.get('id_del_proceso')})\n"
+                    f"{'-'*40}"
+                )
+                resultado.append(item)
+                
+            return "\n\n".join(resultado)
+            
+        except httpx.HTTPStatusError as e:
+            return f"Error al consultar la API de Datos Abiertos: {e.response.status_code}"
+        except Exception as e:
+            return f"Ocurrió un error inesperado: {str(e)}"
 
-@app.get("/")
-async def raiz():
-    return {"status": "activo", "servicio": "SECOP II MCP Server - SseServerTransport"}
-
-# 4. Endpoint GET para el flujo SSE (sin retornar Response extra)
-@app.get("/mcp/sse")
-async def handle_sse_connect(request: Request):
-    async with sse_transport.connect_sse(
-        request.scope, request.receive, request._send
-    ) as streams:
-        await mcp_server.run(
-            streams[0], streams[1], mcp_server.create_initialization_options()
-        )
-
-# 5. Endpoint POST para recibir mensajes (sin retornar Response extra)
-@app.post("/mcp/sse")
-async def handle_sse_messages(request: Request):
-    await sse_transport.handle_post_message(
-        request.scope, request.receive, request._send
-    )
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+# 3. EXPORTAR LA APLICACIÓN WEB PARA RENDER
+# Esto genera automáticamente los endpoints internos correctos (GET /sse y POST /messages)
+app = mcp.sse_app()
