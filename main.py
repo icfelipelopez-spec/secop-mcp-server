@@ -7,7 +7,10 @@ import httpx
 import uvicorn
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from mcp.server.fastmcp import FastMCP
+
+from auth import api_key_autorizada
 from mcp.server.transport_security import TransportSecuritySettings
 
 # =====================================================
@@ -992,10 +995,31 @@ async def health():
 
 @app.middleware("http")
 async def sin_redirect_mcp(request, call_next):
-    """Reescribe /mcp a /mcp/ internamente (POST no sigue bien un 307)."""
+    """Autentica el transporte MCP y evita el redirect 307 de /mcp."""
     if request.scope["path"] == "/mcp":
         request.scope["path"] = "/mcp/"
         request.scope["raw_path"] = b"/mcp/"
+
+    ruta = request.scope["path"]
+    if ruta == "/mcp/" or ruta.startswith("/mcp/"):
+        clave_configurada = os.environ.get("MCP_API_KEY", "").strip()
+        if not clave_configurada:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": "MCP_API_KEY no está configurada en el servidor."
+                },
+            )
+
+        if not api_key_autorizada(
+            request.headers.get("authorization"), clave_configurada
+        ):
+            return JSONResponse(
+                status_code=401,
+                content={"error": "Autenticación MCP requerida o inválida."},
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
     return await call_next(request)
 
 app.mount("/mcp", mcp_http_app)
